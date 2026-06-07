@@ -112,6 +112,7 @@ abstract class BaseAgentSubscription<T> extends Disposable implements IAgentSubs
 	 */
 	setError(error: Error): void {
 		this._error = error;
+		this._onDidChange.fire(this.value as T);
 	}
 
 	/**

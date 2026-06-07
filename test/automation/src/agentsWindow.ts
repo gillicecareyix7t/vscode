@@ -173,16 +173,20 @@ export class AgentsWindow {
 
 		const responseSelector = `${RESPONSE_COMPLETE} .rendered-markdown`;
 		const deadline = Date.now() + timeoutMs;
+		let lastTexts: string[] = [];
 		while (Date.now() < deadline) {
 			const elements = await this.code.getElements(responseSelector, /* recursive */ true);
-			for (const el of (elements ?? [])) {
-				const text = el.textContent || '';
+			lastTexts = (elements ?? []).map(el => el.textContent || '');
+			for (const text of lastTexts) {
 				if (typeof predicate === 'string' ? text.includes(predicate) : predicate.test(text)) {
 					return text;
 				}
 			}
 			await new Promise(r => setTimeout(r, 500));
 		}
-		throw new Error(`Timed out waiting for assistant text matching ${predicate}`);
+		const seen = lastTexts.length
+			? lastTexts.map((t, i) => `  [${i}] ${JSON.stringify(t.length > 500 ? t.slice(0, 500) + '…' : t)}`).join('\n')
+			: '  (no assistant response elements found)';
+		throw new Error(`Timed out waiting for assistant text matching ${predicate}\nLast-seen response text(s):\n${seen}`);
 	}
 }

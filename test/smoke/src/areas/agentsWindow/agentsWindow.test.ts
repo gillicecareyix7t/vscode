@@ -347,13 +347,25 @@ export function setup(logger: Logger) {
 			// Confirm the request flowed through the AgentHost process (not
 			// the renderer-side Copilot Chat extension fallback) by checking
 			// for a `session/turnStarted` frame in the AHP JSONL transcript.
+			// The transcript is written through an async queue (see
+			// AhpJsonlLogger), so the frame may not be on disk yet even
+			// after the assistant reply has rendered — poll briefly.
 			const ahpLogDir = path.join(logsPath, 'ahp');
-			const ahpEntries = fs.existsSync(ahpLogDir)
-				? fs.readdirSync(ahpLogDir).filter(f => f.endsWith('.jsonl'))
-				: [];
-			const ahpFrames = ahpEntries
-				.map(f => fs.readFileSync(path.join(ahpLogDir, f), 'utf8'))
-				.join('\n');
+			const deadline = Date.now() + 5_000;
+			let ahpEntries: string[] = [];
+			let ahpFrames = '';
+			while (Date.now() < deadline) {
+				ahpEntries = fs.existsSync(ahpLogDir)
+					? fs.readdirSync(ahpLogDir).filter(f => f.endsWith('.jsonl'))
+					: [];
+				ahpFrames = ahpEntries
+					.map(f => fs.readFileSync(path.join(ahpLogDir, f), 'utf8'))
+					.join('\n');
+				if (ahpFrames.includes('"type":"session/turnStarted"')) {
+					break;
+				}
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
 			assert.ok(
 				ahpFrames.includes('"type":"session/turnStarted"'),
 				`expected the AgentHost process to have received a session/turnStarted dispatchAction (checked ${ahpEntries.length} jsonl files under ${ahpLogDir}); if missing, the renderer-side extension likely served the reply instead`
