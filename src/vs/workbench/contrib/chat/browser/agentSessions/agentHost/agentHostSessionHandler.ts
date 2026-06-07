@@ -845,8 +845,12 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 	 *
 	 * If the eager subscription exists but hasn't received its first snapshot
 	 * yet (creation in flight), waits for it to hydrate or error before
-	 * returning. This closes a race where the chat request arrives between
-	 * `createSession` resolving and the snapshot landing.
+	 * returning. The connection-level subscription manager gates the
+	 * underlying wire-level subscribe on any in-flight `createSession` for
+	 * this URI (see `AgentSubscriptionManager.trackSessionCreate`), so the
+	 * hydration outcome here is the authoritative success/failure of the
+	 * eager create + subscribe sequence — no separate retry needed at this
+	 * layer.
 	 */
 	private async _readEagerlyCreatedSessionState(resolvedSession: URI, token: CancellationToken): Promise<SessionState | undefined> {
 		const sub = this._config.connection.getSubscriptionUnmanaged(StateComponents.Session, resolvedSession);
@@ -854,7 +858,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 			return undefined;
 		}
 		if (sub.value !== undefined) {
-			return (sub.value instanceof Error) ? undefined : sub.value;
+			return sub.value instanceof Error ? undefined : sub.value;
 		}
 
 		// Snapshot is in flight. Pin the subscription with a fresh
@@ -876,8 +880,7 @@ export class AgentHostSessionHandler extends Disposable implements IChatSessionC
 				}
 			});
 			const value = pinRef.object.value;
-			this._logService.info(`[AgentHost] _readEagerlyCreatedSessionState: hydrated value=${value === undefined ? 'undefined' : value instanceof Error ? `error(${value.message})` : 'state'} cancelled=${token.isCancellationRequested} for ${resolvedSession.toString()}`);
-			return (value && !(value instanceof Error)) ? value : undefined;
+			return value instanceof Error ? undefined : value;
 		} finally {
 			pinRef.dispose();
 		}

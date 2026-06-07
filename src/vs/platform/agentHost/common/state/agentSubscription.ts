@@ -443,6 +443,14 @@ type ManagedSubscriptionEntry = { sub: ManagedSubscription; refCount: number };
 export class AgentSubscriptionManager extends Disposable {
 
 	private readonly _subscriptions = new ResourceMap<ManagedSubscriptionEntry>();
+	/**
+	 * In-flight `createSession` Promises keyed by session URI. Populated
+	 * via {@link trackSessionCreate} by the `IAgentConnection.createSession`
+	 * wrappers; read in {@link getSubscription} so a subscribe that races
+	 * the create waits for the backend to register the session before
+	 * issuing the wire-level `subscribe`.
+	 */
+	private readonly _inflightCreates = new ResourceMap<Promise<unknown>>();
 	private readonly _rootState: RootStateSubscription;
 	private readonly _clientId: string;
 	private readonly _seqAllocator: () => number;
@@ -489,6 +497,27 @@ export class AgentSubscriptionManager extends Disposable {
 	}
 
 	/**
+	 * Register an in-flight `createSession` Promise for a session URI. Any
+	 * subscribe issued for this resource while the create is pending waits
+	 * for the Promise before issuing the wire-level subscribe, so the
+	 * backend has the session registered by the time the subscribe arrives
+	 * and we don't get a transient `AHP_SESSION_NOT_FOUND` race.
+	 *
+	 * The registration is cleared automatically when the Promise settles.
+	 * Callers (e.g. `IAgentConnection.createSession` implementations) MUST
+	 * call this for every session-creation request that may overlap with a
+	 * subscribe (eager creators, provisional sessions, fork, etc.).
+	 */
+	trackSessionCreate(resource: URI, promise: Promise<unknown>): void {
+		this._inflightCreates.set(resource, promise);
+		void promise.finally(() => {
+			if (this._inflightCreates.get(resource) === promise) {
+				this._inflightCreates.delete(resource);
+			}
+		});
+	}
+
+	/**
 	 * Get or create a refcounted subscription to any resource. Disposing
 	 * the returned reference decrements the refcount; when it reaches zero
 	 * the subscription is torn down and the server is notified.
@@ -516,10 +545,27 @@ export class AgentSubscriptionManager extends Disposable {
 		const entry = { sub, refCount: 1 };
 		this._subscriptions.set(resource, entry);
 
-		// Kick off server subscription asynchronously.
+		// Kick off server subscription asynchronously. If a createSession
+		// is in flight for this resource, wait for it first so the
+		// wire-level subscribe lands after the backend has registered
+		// the session (otherwise it would reject with
+		// `AHP_SESSION_NOT_FOUND`).
+		//
 		// Capture the entry reference so we can validate it hasn't been
 		// replaced by a new subscription for the same key (race guard).
-		this._subscribe(resource).then(snapshot => {
+		(async () => {
+			const inflight = this._inflightCreates.get(resource);
+			if (inflight) {
+				try {
+					await inflight;
+				} catch {
+					// Swallow — fall through to subscribe so the error
+					// surfaces consistently via setError() on the
+					// subscription, matching the no-inflight path.
+				}
+			}
+			return this._subscribe(resource);
+		})().then(snapshot => {
 			if (this._subscriptions.get(resource) === entry) {
 				sub.handleSnapshot(snapshot.state as never, snapshot.fromSeq);
 			}
